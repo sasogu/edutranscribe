@@ -17,7 +17,7 @@ Scaffold inicial con:
 - cola de archivos
 - selector de calidad
 - panel de salida
-- servicio de transcripcion simulado
+- transcripcion real con `faster-whisper`
 
 ## Arranque
 
@@ -28,6 +28,9 @@ pip install --upgrade pip
 pip install -e .
 edutranscribe
 ```
+
+La primera transcripcion descargara el modelo necesario segun la calidad elegida.
+Si el backend no puede abrir audio o video, instala `ffmpeg` en el sistema.
 
 ## Estructura
 
@@ -40,6 +43,10 @@ edutranscribe
 
 Este directorio ya no depende de vivir embebido en otro proyecto.
 
-## Siguiente paso tecnico
+## Backend ASR
 
-Sustituir el servicio simulado por un backend con `faster-whisper` y `ffmpeg`.
+- `Rapido`: `Systran/faster-distil-whisper-small.en`
+- `Equilibrado`: `Systran/faster-whisper-small`
+- `Maxima calidad`: `Systran/faster-whisper-medium`
+
+El servicio usa carga perezosa y reutiliza cada modelo una vez inicializado.
