@@ -9,6 +9,26 @@ class QueueItem:
   path: Path
   status: str = "Pendiente"
   text: str = ""
+  detected_language: str = ""
+  detected_language_probability: float = 0.0
+  model_name: str = ""
+  segments: list["TranscriptSegment"] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptSegment:
+  start: float
+  end: float
+  text: str
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptionResult:
+  text: str
+  model_name: str
+  language: str
+  language_probability: float
+  segments: tuple[TranscriptSegment, ...]
 
 
 @dataclass(frozen=True, slots=True)

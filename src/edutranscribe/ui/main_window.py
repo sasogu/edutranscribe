@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
   QWidget,
 )
 
-from ..models import LANGUAGE_PRESETS, QUALITY_PRESETS, QueueItem
+from ..models import LANGUAGE_PRESETS, QUALITY_PRESETS, QueueItem, TranscriptionResult, TranscriptSegment
 from ..services.transcription import TranscriptionService
 
 
@@ -35,7 +35,7 @@ class WorkerSignals(QObject):
   progress = Signal(int, int, str)
   log = Signal(int, str)
   cancelled = Signal(int, str)
-  finished = Signal(int, str)
+  finished = Signal(int, object)
   failed = Signal(int, str)
 
 
@@ -62,7 +62,7 @@ class TranscriptionTask(QRunnable):
     try:
       self.signals.started.emit(self.row, self.item.path.name)
       self.signals.log.emit(self.row, f"Iniciando transcripcion en calidad '{self.quality}'.")
-      text = self.service.transcribe(
+      result = self.service.transcribe(
         self.item,
         self.quality,
         language=self.language,
@@ -77,7 +77,7 @@ class TranscriptionTask(QRunnable):
       self.signals.failed.emit(self.row, str(exc))
       return
 
-    self.signals.finished.emit(self.row, text)
+    self.signals.finished.emit(self.row, result)
 
 
 class DropListWidget(QListWidget):
@@ -173,6 +173,10 @@ class MainWindow(QMainWindow):
     self.copy_button.clicked.connect(self.copy_output)
     self.copy_button.setEnabled(False)
 
+    self.export_button = QPushButton("Exportar")
+    self.export_button.clicked.connect(self.export_output)
+    self.export_button.setEnabled(False)
+
     self.add_button = QPushButton("Anadir archivos")
     self.add_button.clicked.connect(self.pick_files)
 
@@ -229,6 +233,7 @@ class MainWindow(QMainWindow):
     actions.addWidget(self.start_button)
     actions.addWidget(self.cancel_button)
     actions.addWidget(self.copy_button)
+    actions.addWidget(self.export_button)
     right_layout.addLayout(actions)
     right_layout.addWidget(QLabel("Progreso"))
     right_layout.addWidget(self.progress_label)
@@ -290,6 +295,7 @@ class MainWindow(QMainWindow):
     self.queue_list.takeItem(row)
     self.output.clear()
     self.copy_button.setEnabled(False)
+    self.export_button.setEnabled(False)
     self.statusBar().showMessage("Elemento eliminado de la cola.")
 
   def clear_queue(self) -> None:
@@ -297,6 +303,7 @@ class MainWindow(QMainWindow):
     self.queue_list.clear()
     self.output.clear()
     self.copy_button.setEnabled(False)
+    self.export_button.setEnabled(False)
     self.statusBar().showMessage("Cola vaciada.")
 
   def transcribe_selected(self) -> None:
@@ -311,6 +318,7 @@ class MainWindow(QMainWindow):
     self.start_button.setEnabled(False)
     self.cancel_button.setEnabled(True)
     self.copy_button.setEnabled(False)
+    self.export_button.setEnabled(False)
     self.progress_bar.setValue(0)
     self.progress_label.setText(f"Preparando {item.path.name}...")
     self._append_log(f"[{item.path.name}] Cola -> Procesando")
@@ -361,6 +369,45 @@ class MainWindow(QMainWindow):
     self.statusBar().showMessage("Transcripcion copiada al portapapeles.")
     self._append_log("[UI] Resultado copiado al portapapeles")
 
+  def export_output(self) -> None:
+    row = self.queue_list.currentRow()
+    if row < 0 or row >= len(self.queue_items):
+      self.statusBar().showMessage("No hay transcripcion para exportar.")
+      return
+
+    item = self.queue_items[row]
+    if not item.text.strip():
+      self.statusBar().showMessage("No hay transcripcion para exportar.")
+      return
+
+    default_base = item.path.with_suffix("")
+    target_path, _ = QFileDialog.getSaveFileName(
+      self,
+      "Exportar transcripcion",
+      str(default_base.with_suffix(".txt")),
+      "Texto plano (*.txt);;Markdown (*.md);;SubRip (*.srt);;WebVTT (*.vtt)",
+    )
+    if not target_path:
+      return
+
+    export_path = Path(target_path)
+    suffix = export_path.suffix.lower()
+    if suffix not in {".txt", ".md", ".srt", ".vtt"}:
+      export_path = export_path.with_suffix(".txt")
+      suffix = ".txt"
+
+    try:
+      content = self._build_export_content(item, suffix)
+      export_path.write_text(content, encoding="utf-8")
+    except Exception as exc:
+      self.statusBar().showMessage(f"No se pudo exportar {export_path.name}.")
+      self._append_log(f"[{item.path.name}] ERROR exportando -> {exc}")
+      QMessageBox.critical(self, "Error de exportacion", str(exc))
+      return
+
+    self.statusBar().showMessage(f"Exportado: {export_path.name}")
+    self._append_log(f"[{item.path.name}] Exportado -> {export_path}")
+
   def _handle_started(self, row: int, file_name: str) -> None:
     if row >= len(self.queue_items):
       return
@@ -382,16 +429,25 @@ class MainWindow(QMainWindow):
     item = self.queue_items[row]
     self._append_log(f"[{item.path.name}] {message}")
 
-  def _handle_finished(self, row: int, text: str) -> None:
+  def _handle_finished(self, row: int, result: object) -> None:
+    if not isinstance(result, TranscriptionResult):
+      self._handle_failed(row, "Resultado de transcripcion invalido.")
+      return
+
     item = self.queue_items[row]
     item.status = "Completado"
-    item.text = text
+    item.text = result.text
+    item.model_name = result.model_name
+    item.detected_language = result.language
+    item.detected_language_probability = result.language_probability
+    item.segments = list(result.segments)
     self._refresh_row(row)
     if self.queue_list.currentRow() == row:
-      self.output.setPlainText(text)
+      self.output.setPlainText(result.text)
     self.start_button.setEnabled(True)
     self.cancel_button.setEnabled(False)
     self.copy_button.setEnabled(True)
+    self.export_button.setEnabled(True)
     self.progress_bar.setValue(100)
     self.progress_label.setText(f"Completado: {item.path.name}")
     self._append_log(f"[{item.path.name}] Transcripcion completada")
@@ -405,6 +461,7 @@ class MainWindow(QMainWindow):
     self.start_button.setEnabled(True)
     self.cancel_button.setEnabled(False)
     self.progress_bar.setValue(0)
+    self.export_button.setEnabled(False)
     self.progress_label.setText(f"Cancelado: {item.path.name}")
     self._append_log(f"[{item.path.name}] Cancelado · {message}")
     self.statusBar().showMessage(f"Transcripcion cancelada: {item.path.name}")
@@ -417,6 +474,7 @@ class MainWindow(QMainWindow):
     self.start_button.setEnabled(True)
     self.cancel_button.setEnabled(False)
     self.progress_bar.setValue(0)
+    self.export_button.setEnabled(False)
     self.progress_label.setText(f"Error: {item.path.name}")
     self._append_log(f"[{item.path.name}] ERROR · {message}")
     self.statusBar().showMessage(f"Error en {item.path.name}")
@@ -427,11 +485,13 @@ class MainWindow(QMainWindow):
     if row < 0 or row >= len(self.queue_items):
       self.output.clear()
       self.copy_button.setEnabled(False)
+      self.export_button.setEnabled(False)
       return
 
     item = self.queue_items[row]
     self.output.setPlainText(item.text)
     self.copy_button.setEnabled(bool(item.text.strip()))
+    self.export_button.setEnabled(bool(item.text.strip()))
 
   def update_quality_hint(self) -> None:
     index = self.quality_combo.currentIndex()
@@ -454,6 +514,81 @@ class MainWindow(QMainWindow):
   def _append_log(self, message: str) -> None:
     timestamp = datetime.now().strftime("%H:%M:%S")
     self.log_output.appendPlainText(f"{timestamp}  {message}")
+
+  def _build_export_content(self, item: QueueItem, suffix: str) -> str:
+    if suffix == ".txt":
+      return item.text.strip() + "\n"
+    if suffix == ".md":
+      return self._format_markdown(item)
+    if suffix == ".srt":
+      if not item.segments:
+        raise ValueError("No hay segmentos disponibles para exportar en formato SRT.")
+      return self._format_srt(item.segments)
+    if suffix == ".vtt":
+      if not item.segments:
+        raise ValueError("No hay segmentos disponibles para exportar en formato VTT.")
+      return self._format_vtt(item.segments)
+    raise ValueError(f"Formato de exportacion no soportado: {suffix}")
+
+  def _format_markdown(self, item: QueueItem) -> str:
+    lines = [
+      f"# {item.path.name}",
+      "",
+      f"- Modelo: `{item.model_name}`" if item.model_name else "- Modelo: desconocido",
+      f"- Idioma detectado: `{item.detected_language}`" if item.detected_language else "- Idioma detectado: desconocido",
+      f"- Confianza idioma: `{item.detected_language_probability:.2f}`",
+      "",
+      "## Transcripcion",
+      "",
+      item.text.strip(),
+      "",
+    ]
+    if item.segments:
+      lines.extend(["## Segmentos", ""])
+      for segment in item.segments:
+        lines.append(
+          f"- `{self._format_timestamp(segment.start, for_vtt=True)} - "
+          f"{self._format_timestamp(segment.end, for_vtt=True)}` {segment.text}"
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+  def _format_srt(self, segments: list[TranscriptSegment]) -> str:
+    blocks: list[str] = []
+    for index, segment in enumerate(segments, start=1):
+      blocks.append(
+        "\n".join(
+          [
+            str(index),
+            f"{self._format_timestamp(segment.start)} --> {self._format_timestamp(segment.end)}",
+            segment.text,
+          ]
+        )
+      )
+    return "\n\n".join(blocks).rstrip() + "\n"
+
+  def _format_vtt(self, segments: list[TranscriptSegment]) -> str:
+    blocks = ["WEBVTT"]
+    for segment in segments:
+      blocks.append(
+        "\n".join(
+          [
+            "",
+            f"{self._format_timestamp(segment.start, for_vtt=True)} --> "
+            f"{self._format_timestamp(segment.end, for_vtt=True)}",
+            segment.text,
+          ]
+        )
+      )
+    return "\n".join(blocks).rstrip() + "\n"
+
+  @staticmethod
+  def _format_timestamp(seconds: float, for_vtt: bool = False) -> str:
+    total_millis = max(int(round(seconds * 1000)), 0)
+    hours, remainder = divmod(total_millis, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    secs, millis = divmod(remainder, 1000)
+    separator = "." if for_vtt else ","
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}{separator}{millis:03d}"
 
   def _clear_running_task(self, row: int) -> None:
     if self.current_task_row == row:

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from shutil import which
 
-from ..models import QueueItem
+from ..models import QueueItem, TranscriptionResult, TranscriptSegment
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,7 +80,7 @@ class TranscriptionService:
     progress_callback=None,
     status_callback=None,
     is_cancelled=None,
-  ) -> str:
+  ) -> TranscriptionResult:
     path = Path(item.path).expanduser().resolve()
     if not path.exists() or not path.is_file():
       raise FileNotFoundError(f"Archivo no encontrado: {path}")
@@ -115,6 +115,7 @@ class TranscriptionService:
 
     duration = max(float(getattr(info, "duration", 0.0) or 0.0), 0.0)
     text_parts: list[str] = []
+    collected_segments: list[TranscriptSegment] = []
     last_percent = -1
     for segment in segments:
       self._raise_if_cancelled(is_cancelled)
@@ -122,6 +123,13 @@ class TranscriptionService:
       text = segment.text.strip()
       if text:
         text_parts.append(text)
+        collected_segments.append(
+          TranscriptSegment(
+            start=float(segment.start),
+            end=float(segment.end),
+            text=text,
+          )
+        )
 
       if progress_callback is not None and duration > 0:
         percent = min(int((segment.end / duration) * 100), 100)
@@ -145,7 +153,13 @@ class TranscriptionService:
       f"Probabilidad idioma: {info.language_probability:.2f}",
       "",
     ]
-    return "\n".join(header + text_parts)
+    return TranscriptionResult(
+      text="\n".join(header + text_parts),
+      model_name=config.model_size,
+      language=str(info.language),
+      language_probability=float(info.language_probability),
+      segments=tuple(collected_segments),
+    )
 
   @staticmethod
   def _raise_if_cancelled(is_cancelled) -> None:
