@@ -125,6 +125,7 @@ class MainWindow(QMainWindow):
     self.queue_items: list[QueueItem] = []
     self.current_task_row: int | None = None
     self.current_cancel_event: Event | None = None
+    self.pending_batch_rows: list[int] = []
 
     self.queue_list = DropListWidget()
     self.queue_list.files_dropped.connect(self.add_paths)
@@ -165,6 +166,9 @@ class MainWindow(QMainWindow):
     self.start_button = QPushButton("Transcribir seleccion")
     self.start_button.clicked.connect(self.transcribe_selected)
 
+    self.start_all_button = QPushButton("Transcribir todo")
+    self.start_all_button.clicked.connect(self.transcribe_all)
+
     self.cancel_button = QPushButton("Interrumpir")
     self.cancel_button.clicked.connect(self.cancel_transcription)
     self.cancel_button.setEnabled(False)
@@ -176,6 +180,10 @@ class MainWindow(QMainWindow):
     self.export_button = QPushButton("Exportar")
     self.export_button.clicked.connect(self.export_output)
     self.export_button.setEnabled(False)
+
+    self.export_batch_button = QPushButton("Exportar lote MD")
+    self.export_batch_button.clicked.connect(self.export_batch_markdown)
+    self.export_batch_button.setEnabled(False)
 
     self.add_button = QPushButton("Anadir archivos")
     self.add_button.clicked.connect(self.pick_files)
@@ -231,9 +239,11 @@ class MainWindow(QMainWindow):
     right_layout.addWidget(self.language_hint)
     actions = QHBoxLayout()
     actions.addWidget(self.start_button)
+    actions.addWidget(self.start_all_button)
     actions.addWidget(self.cancel_button)
     actions.addWidget(self.copy_button)
     actions.addWidget(self.export_button)
+    actions.addWidget(self.export_batch_button)
     right_layout.addLayout(actions)
     right_layout.addWidget(QLabel("Progreso"))
     right_layout.addWidget(self.progress_label)
@@ -296,6 +306,7 @@ class MainWindow(QMainWindow):
     self.output.clear()
     self.copy_button.setEnabled(False)
     self.export_button.setEnabled(False)
+    self.export_batch_button.setEnabled(self._has_completed_transcriptions())
     self.statusBar().showMessage("Elemento eliminado de la cola.")
 
   def clear_queue(self) -> None:
@@ -304,6 +315,7 @@ class MainWindow(QMainWindow):
     self.output.clear()
     self.copy_button.setEnabled(False)
     self.export_button.setEnabled(False)
+    self.export_batch_button.setEnabled(False)
     self.statusBar().showMessage("Cola vaciada.")
 
   def transcribe_selected(self) -> None:
@@ -311,14 +323,45 @@ class MainWindow(QMainWindow):
     if row < 0:
       QMessageBox.information(self, "Sin seleccion", "Selecciona un archivo de la cola primero.")
       return
+    self.pending_batch_rows = []
+    self._start_transcription(row)
+
+  def transcribe_all(self) -> None:
+    if not self.queue_items:
+      QMessageBox.information(self, "Cola vacia", "Anade al menos un archivo a la cola.")
+      return
+    if self.current_task_row is not None:
+      return
+
+    rows = [index for index, item in enumerate(self.queue_items) if item.status != "Completado"]
+    if not rows:
+      self.statusBar().showMessage("Todos los elementos de la cola ya estan transcritos.")
+      return
+
+    self.pending_batch_rows = rows[1:]
+    self._append_log(f"[Lote] Inicio de lote con {len(rows)} archivo(s)")
+    self._start_transcription(rows[0])
+
+  def _start_transcription(self, row: int) -> None:
+    if row < 0 or row >= len(self.queue_items):
+      return
+    if self.current_task_row is not None:
+      return
 
     item = self.queue_items[row]
     item.status = "Procesando"
     self._refresh_row(row)
     self.start_button.setEnabled(False)
+    self.start_all_button.setEnabled(False)
     self.cancel_button.setEnabled(True)
     self.copy_button.setEnabled(False)
     self.export_button.setEnabled(False)
+    self.export_batch_button.setEnabled(False)
+    self.add_button.setEnabled(False)
+    self.remove_button.setEnabled(False)
+    self.clear_button.setEnabled(False)
+    self.quality_combo.setEnabled(False)
+    self.language_combo.setEnabled(False)
     self.progress_bar.setValue(0)
     self.progress_label.setText(f"Preparando {item.path.name}...")
     self._append_log(f"[{item.path.name}] Cola -> Procesando")
@@ -408,6 +451,37 @@ class MainWindow(QMainWindow):
     self.statusBar().showMessage(f"Exportado: {export_path.name}")
     self._append_log(f"[{item.path.name}] Exportado -> {export_path}")
 
+  def export_batch_markdown(self) -> None:
+    completed_items = [item for item in self.queue_items if item.text.strip()]
+    if not completed_items:
+      self.statusBar().showMessage("No hay transcripciones completadas para exportar.")
+      return
+
+    target_path, _ = QFileDialog.getSaveFileName(
+      self,
+      "Exportar lote Markdown",
+      str(Path.cwd() / "edutranscribe-lote.md"),
+      "Markdown (*.md)",
+    )
+    if not target_path:
+      return
+
+    export_path = Path(target_path)
+    if export_path.suffix.lower() != ".md":
+      export_path = export_path.with_suffix(".md")
+
+    try:
+      content = self._format_batch_markdown(completed_items)
+      export_path.write_text(content, encoding="utf-8")
+    except Exception as exc:
+      self.statusBar().showMessage(f"No se pudo exportar {export_path.name}.")
+      self._append_log(f"[Lote] ERROR exportando lote -> {exc}")
+      QMessageBox.critical(self, "Error de exportacion", str(exc))
+      return
+
+    self.statusBar().showMessage(f"Lote exportado: {export_path.name}")
+    self._append_log(f"[Lote] Exportado -> {export_path}")
+
   def _handle_started(self, row: int, file_name: str) -> None:
     if row >= len(self.queue_items):
       return
@@ -444,41 +518,36 @@ class MainWindow(QMainWindow):
     self._refresh_row(row)
     if self.queue_list.currentRow() == row:
       self.output.setPlainText(result.text)
-    self.start_button.setEnabled(True)
-    self.cancel_button.setEnabled(False)
-    self.copy_button.setEnabled(True)
-    self.export_button.setEnabled(True)
     self.progress_bar.setValue(100)
     self.progress_label.setText(f"Completado: {item.path.name}")
     self._append_log(f"[{item.path.name}] Transcripcion completada")
     self.statusBar().showMessage(f"Transcripcion completada: {item.path.name}")
     self._clear_running_task(row)
+    self._after_task_success(row)
 
   def _handle_cancelled(self, row: int, message: str) -> None:
     item = self.queue_items[row]
     item.status = "Cancelado"
     self._refresh_row(row)
-    self.start_button.setEnabled(True)
-    self.cancel_button.setEnabled(False)
     self.progress_bar.setValue(0)
-    self.export_button.setEnabled(False)
     self.progress_label.setText(f"Cancelado: {item.path.name}")
     self._append_log(f"[{item.path.name}] Cancelado · {message}")
     self.statusBar().showMessage(f"Transcripcion cancelada: {item.path.name}")
     self._clear_running_task(row)
+    self.pending_batch_rows = []
+    self._set_idle_buttons()
 
   def _handle_failed(self, row: int, message: str) -> None:
     item = self.queue_items[row]
     item.status = "Error"
     self._refresh_row(row)
-    self.start_button.setEnabled(True)
-    self.cancel_button.setEnabled(False)
     self.progress_bar.setValue(0)
-    self.export_button.setEnabled(False)
     self.progress_label.setText(f"Error: {item.path.name}")
     self._append_log(f"[{item.path.name}] ERROR · {message}")
     self.statusBar().showMessage(f"Error en {item.path.name}")
     self._clear_running_task(row)
+    self.pending_batch_rows = []
+    self._set_idle_buttons()
     QMessageBox.critical(self, "Error de transcripcion", message)
 
   def show_selected_text(self, row: int) -> None:
@@ -543,14 +612,30 @@ class MainWindow(QMainWindow):
       item.text.strip(),
       "",
     ]
-    if item.segments:
-      lines.extend(["## Segmentos", ""])
-      for segment in item.segments:
-        lines.append(
-          f"- `{self._format_timestamp(segment.start, for_vtt=True)} - "
-          f"{self._format_timestamp(segment.end, for_vtt=True)}` {segment.text}"
-        )
     return "\n".join(lines).rstrip() + "\n"
+
+  def _format_batch_markdown(self, items: list[QueueItem]) -> str:
+    sections = [
+      "# Lote de transcripciones",
+      "",
+      f"- Archivos incluidos: `{len(items)}`",
+      f"- Generado: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`",
+      "",
+    ]
+    for item in items:
+      sections.extend(
+        [
+          f"## {item.path.name}",
+          "",
+          f"- Modelo: `{item.model_name}`" if item.model_name else "- Modelo: desconocido",
+          f"- Idioma detectado: `{item.detected_language}`" if item.detected_language else "- Idioma detectado: desconocido",
+          f"- Confianza idioma: `{item.detected_language_probability:.2f}`",
+          "",
+          item.text.strip(),
+          "",
+        ]
+      )
+    return "\n".join(sections).rstrip() + "\n"
 
   def _format_srt(self, segments: list[TranscriptSegment]) -> str:
     blocks: list[str] = []
@@ -594,6 +679,43 @@ class MainWindow(QMainWindow):
     if self.current_task_row == row:
       self.current_task_row = None
       self.current_cancel_event = None
+
+  def _after_task_success(self, row: int) -> None:
+    if self.pending_batch_rows:
+      next_row = self.pending_batch_rows.pop(0)
+      self.queue_list.setCurrentRow(next_row)
+      self._append_log(f"[Lote] Siguiente archivo: {self.queue_items[next_row].path.name}")
+      self._start_transcription(next_row)
+      return
+
+    self._set_idle_buttons()
+    current_row = self.queue_list.currentRow()
+    if current_row == row:
+      self.copy_button.setEnabled(True)
+      self.export_button.setEnabled(True)
+    self._append_log("[Lote] Lote finalizado")
+
+  def _set_idle_buttons(self) -> None:
+    self.start_button.setEnabled(True)
+    self.start_all_button.setEnabled(True)
+    self.cancel_button.setEnabled(False)
+    self.add_button.setEnabled(True)
+    self.remove_button.setEnabled(True)
+    self.clear_button.setEnabled(True)
+    self.quality_combo.setEnabled(True)
+    self.language_combo.setEnabled(True)
+    current_row = self.queue_list.currentRow()
+    has_text = (
+      current_row >= 0
+      and current_row < len(self.queue_items)
+      and bool(self.queue_items[current_row].text.strip())
+    )
+    self.copy_button.setEnabled(has_text)
+    self.export_button.setEnabled(has_text)
+    self.export_batch_button.setEnabled(self._has_completed_transcriptions())
+
+  def _has_completed_transcriptions(self) -> bool:
+    return any(item.text.strip() for item in self.queue_items)
 
   def _refresh_row(self, row: int) -> None:
     widget_item = self.queue_list.item(row)
