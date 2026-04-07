@@ -18,10 +18,9 @@ class ModelConfig:
 
 QUALITY_CONFIGS: dict[str, ModelConfig] = {
   "fast": ModelConfig(
-    model_size="Systran/faster-distil-whisper-small.en",
+    model_size="Systran/faster-whisper-small",
     compute_type="int8",
     beam_size=1,
-    language="en",
   ),
   "balanced": ModelConfig(
     model_size="Systran/faster-whisper-small",
@@ -73,19 +72,34 @@ class TranscriptionService:
     self._models[quality] = model
     return model, config
 
-  def transcribe(self, item: QueueItem, quality: str) -> str:
+  def transcribe(
+    self,
+    item: QueueItem,
+    quality: str,
+    language: str | None = None,
+    progress_callback=None,
+    status_callback=None,
+    is_cancelled=None,
+  ) -> str:
     path = Path(item.path).expanduser().resolve()
     if not path.exists() or not path.is_file():
       raise FileNotFoundError(f"Archivo no encontrado: {path}")
 
+    self._raise_if_cancelled(is_cancelled)
+    if status_callback is not None:
+      status_callback("Preparando archivo")
+
     model, config = self._get_model(quality)
+    self._raise_if_cancelled(is_cancelled)
+    if status_callback is not None:
+      status_callback(f"Modelo listo: {config.model_size}")
 
     try:
       segments, info = model.transcribe(
         str(path),
         beam_size=config.beam_size,
         vad_filter=config.vad_filter,
-        language=config.language,
+        language=language if language is not None else config.language,
       )
     except FileNotFoundError as exc:
       if which("ffmpeg") is None:
@@ -96,14 +110,33 @@ class TranscriptionService:
     except Exception as exc:
       raise RuntimeError(f"Error al transcribir '{path.name}': {exc}") from exc
 
+    if status_callback is not None:
+      status_callback("Procesando segmentos")
+
+    duration = max(float(getattr(info, "duration", 0.0) or 0.0), 0.0)
     text_parts: list[str] = []
+    last_percent = -1
     for segment in segments:
+      self._raise_if_cancelled(is_cancelled)
+
       text = segment.text.strip()
       if text:
         text_parts.append(text)
 
+      if progress_callback is not None and duration > 0:
+        percent = min(int((segment.end / duration) * 100), 100)
+        if percent != last_percent:
+          progress_callback(percent, f"Segmento {segment.start:.1f}s -> {segment.end:.1f}s")
+          last_percent = percent
+
     if not text_parts:
       raise RuntimeError("La transcripcion no produjo texto util.")
+
+    if progress_callback is not None and last_percent < 100:
+      progress_callback(100, "Segmentos completados")
+
+    if status_callback is not None:
+      status_callback("Generando salida final")
 
     header = [
       f"Archivo: {path.name}",
@@ -113,3 +146,8 @@ class TranscriptionService:
       "",
     ]
     return "\n".join(header + text_parts)
+
+  @staticmethod
+  def _raise_if_cancelled(is_cancelled) -> None:
+    if is_cancelled is not None and is_cancelled():
+      raise RuntimeError("Transcripcion cancelada por el usuario.")

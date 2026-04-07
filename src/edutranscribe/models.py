@@ -18,11 +18,18 @@ class QualityPreset:
   description: str
 
 
+@dataclass(frozen=True, slots=True)
+class LanguagePreset:
+  key: str
+  label: str
+  description: str
+
+
 QUALITY_PRESETS = (
   QualityPreset(
     key="fast",
     label="Rapido",
-    description="Menor precision, mejor respuesta y menos consumo.",
+    description="Menor precision, mejor respuesta y menos consumo. Adecuado para borradores.",
   ),
   QualityPreset(
     key="balanced",
@@ -33,5 +40,24 @@ QUALITY_PRESETS = (
     key="best",
     label="Maxima calidad",
     description="Pensado para usar Whisper grande y tardar mas.",
+  ),
+)
+
+
+LANGUAGE_PRESETS = (
+  LanguagePreset(
+    key="es",
+    label="Espanol",
+    description="Fuerza la transcripcion en castellano y evita falsas detecciones.",
+  ),
+  LanguagePreset(
+    key="auto",
+    label="Auto",
+    description="Detecta el idioma automaticamente. Puede fallar con audio ambiguo.",
+  ),
+  LanguagePreset(
+    key="en",
+    label="Ingles",
+    description="Fuerza la transcripcion en ingles.",
   ),
 )
